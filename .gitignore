@@ -1,0 +1,8 @@
+# personal data and settings
+*.csv
+*.tmp
+phone-ip.txt
+NOTES.md
+
+# build output: published under Releases
+*.exe
