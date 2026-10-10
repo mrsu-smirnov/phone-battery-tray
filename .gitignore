@@ -6,3 +6,7 @@ NOTES.md
 
 # build output: published under Releases
 *.exe
+
+# pictures from --preview / --details / --chart: they show your own history
+*.png
+!screenshot.png

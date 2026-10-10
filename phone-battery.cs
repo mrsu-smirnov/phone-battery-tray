@@ -56,7 +56,7 @@ static class PhoneBattery
         return "adb.exe";
     }
 
-    static readonly CultureInfo DateCulture = new CultureInfo(RuUi ? "ru-RU" : "en-US");
+    static readonly CultureInfo UiCulture = new CultureInfo(RuUi ? "ru-RU" : "en-US");
     static readonly string[] SpanTitles = { L("Последние 6 часов", "Last 6 hours"), L("Последние 12 часов", "Last 12 hours"), L("Последние 24 часа", "Last 24 hours"), L("Последняя неделя", "Last week") };
     static readonly string[] SpanNames = { L("6 ч", "6 h"), L("12 ч", "12 h"), L("24 ч", "24 h"), L("Неделя", "Week") };
     static readonly Color LineDischarge = Color.FromArgb(0, 103, 192);
@@ -87,6 +87,9 @@ static class PhoneBattery
     static bool? wasCharging;
     static bool lowWarned, lostWarned;
     static int failCount;
+    static volatile bool adbMissing;    // adb.exe could not be started
+    static volatile bool unauthorized;  // the phone is on USB but has not allowed USB debugging yet
+    static string tcpipDone;            // USB serial already switched to Wi-Fi, so adbd is not restarted every minute
 
     [STAThread]
     static void Main(string[] args)
@@ -162,12 +165,14 @@ static class PhoneBattery
             psi.RedirectStandardError = true;
             using (var p = Process.Start(psi))
             {
+                adbMissing = false;
                 var output = p.StandardOutput.ReadToEndAsync();
                 p.StandardError.ReadToEndAsync();
                 if (!p.WaitForExit(timeoutMs)) { try { p.Kill(); } catch { } return ""; }
                 return output.Wait(2000) ? output.Result : "";
             }
         }
+        catch (System.ComponentModel.Win32Exception) { adbMissing = true; return ""; }
         catch { return ""; }
     }
 
@@ -219,8 +224,13 @@ static class PhoneBattery
         string addr = ip == null ? null : ip + ":" + Port;
         var devs = Devices();
         string usb = null;
+        unauthorized = false;
         foreach (var kv in devs)
+        {
+            if (kv.Value == "unauthorized") unauthorized = true;
             if (!kv.Key.Contains(":") && kv.Value == "device") { usb = kv.Key; break; }
+        }
+        if (usb == null) tcpipDone = null;
 
         if (usb != null)
         {
@@ -230,8 +240,9 @@ static class PhoneBattery
                 addr = m.Groups[1].Value + ":" + Port;
                 try { File.WriteAllText(IpFile, m.Groups[1].Value); } catch { }
             }
-            if (addr != null && State(devs, addr) != "device")
+            if (addr != null && State(devs, addr) != "device" && tcpipDone != usb)
             {
+                tcpipDone = usb;
                 RunAdb("-s " + usb + " tcpip " + Port, 8000);
                 Thread.Sleep(2000);
                 RunAdb("connect " + addr, 6000);
@@ -322,7 +333,7 @@ static class PhoneBattery
     static string Temp(Dictionary<string, string> v)
     {
         double t;
-        return double.TryParse(Get(v, "temperature"), out t) ? (t / 10).ToString("0.0") : "?";
+        return double.TryParse(Get(v, "temperature"), out t) ? (t / 10).ToString("0.0", UiCulture) : "?";
     }
 
     static void OnUi(Action a)
@@ -339,13 +350,33 @@ static class PhoneBattery
         if (v == null)
         {
             failCount++;
-            bool warn = failCount >= 3 && !lostWarned;
+            // tray tips are cut at 63 characters
+            string lostTip, lostTitle, lostText;
+            if (adbMissing)
+            {
+                lostTip = L("Телефон: не найден adb.exe", "Phone: adb.exe not found");
+                lostTitle = L("Не найден adb.exe", "adb.exe not found");
+                lostText = L("Положите папку platform-tools из Android SDK рядом с программой — подробности в README.", "Put the Android SDK platform-tools folder next to the program. See the README.");
+            }
+            else if (unauthorized)
+            {
+                lostTip = L("Телефон: разрешите отладку по USB", "Phone: allow USB debugging");
+                lostTitle = L("Разрешите отладку по USB", "Allow USB debugging");
+                lostText = L("На экране телефона: «Всегда разрешать с этого компьютера» и «Разрешить».", "On the phone screen: tick \"Always allow from this computer\" and tap Allow.");
+            }
+            else
+            {
+                lostTip = L("Телефон: нет связи (", "Phone: no connection (") + now + L(")\nПосле перезагрузки — USB-кабель", ")\nAfter a reboot: USB for a minute");
+                lostTitle = L("Телефон не отвечает", "Phone is not responding");
+                lostText = L("Если телефон перезагружался, подключите его кабелем к компьютеру на минуту — программа сама включит связь по Wi-Fi.", "If the phone has rebooted, connect it to the computer by USB for a minute and the program will switch adb back to Wi-Fi.");
+            }
+            bool warn = (adbMissing || unauthorized || failCount >= 3) && !lostWarned;
             if (warn) lostWarned = true;
             OnUi(delegate
             {
                 SetIcon(-1, false);
-                SetTip(L("Телефон: нет связи (", "Phone: no connection (") + now + L(")\nПосле перезагрузки — кабель на минуту", ")\nAfter a reboot, plug in USB for a minute"));
-                if (warn) tray.ShowBalloonTip(10000, L("Телефон не отвечает", "Phone is not responding"), L("Если телефон перезагружался, подключите его кабелем к компьютеру на минуту — программа сама включит связь по Wi-Fi.", "If the phone has rebooted, connect it to the computer by USB for a minute and the program will switch adb back to Wi-Fi."), ToolTipIcon.Warning);
+                SetTip(lostTip);
+                if (warn) tray.ShowBalloonTip(10000, lostTitle, lostText, ToolTipIcon.Warning);
             });
             return;
         }
@@ -449,6 +480,15 @@ static class PhoneBattery
         catch { return false; }
     }
 
+    // Icon glyphs: Segoe Fluent Icons on Windows 11, Segoe MDL2 Assets (same code points) on Windows 10
+    static Font IconFont(float px)
+    {
+        var f = new Font("Segoe Fluent Icons", px, GraphicsUnit.Pixel);
+        if (f.Name == "Segoe Fluent Icons") return f;
+        f.Dispose();
+        return new Font("Segoe MDL2 Assets", px, GraphicsUnit.Pixel);
+    }
+
     static Font UiFont(float px, bool semibold, bool display)
     {
         string name = display ? (semibold ? "Segoe UI Variable Display Semib" : "Segoe UI Variable Display")
@@ -502,7 +542,7 @@ static class PhoneBattery
         var r = new List<string[]>();
         double volt;
         r.Add(new[] { L("Температура", "Temperature"), Temp(v) + " °C" });
-        if (double.TryParse(Get(v, "voltage"), out volt)) r.Add(new[] { L("Напряжение", "Voltage"), (volt / 1000).ToString("0.00") + L(" В", " V") });
+        if (double.TryParse(Get(v, "voltage"), out volt)) r.Add(new[] { L("Напряжение", "Voltage"), (volt / 1000).ToString("0.00", UiCulture) + L(" В", " V") });
         r.Add(new[] { L("Питание", "Power"), Cap(Power(v)) });
         r.Add(new[] { L("Здоровье", "Health"), Cap(HealthName(Get(v, "health"))) });
         if (Get(v, "mSavedBatteryAsoc") != "") r.Add(new[] { L("Ёмкость от заводской", "Capacity vs. new"), Get(v, "mSavedBatteryAsoc") + " %" });
@@ -980,7 +1020,7 @@ static class PhoneBattery
                 {
                     DateTime noon = day.AddHours(12);
                     if (noon > from && noon < now)
-                        g.DrawString(day.ToString("ddd d", DateCulture), small, axisText, X(noon), top + ph + 4 * k, sfCenter);
+                        g.DrawString(day.ToString("ddd d", UiCulture), small, axisText, X(noon), top + ph + 4 * k, sfCenter);
                 }
             }
             else
@@ -1101,7 +1141,7 @@ static class PhoneBattery
         using (var ring = new SolidBrush(t.Card)) g.FillEllipse(ring, px - 6 * k, py - 6 * k, 12 * k, 12 * k);
         using (var dot = new SolidBrush(c)) g.FillEllipse(dot, px - 4 * k, py - 4 * k, 8 * k, 8 * k);
 
-        string when = geo.Hours > 48 ? s.T.ToString("ddd d MMM, HH:mm", DateCulture) : s.T.ToString("HH:mm");
+        string when = geo.Hours > 48 ? s.T.ToString("ddd d MMM, HH:mm", UiCulture) : s.T.ToString("HH:mm");
         string line1 = when + " · " + s.Level + " %";
         string line2 = (s.Charging ? L("заряжается", "charging") : L("разряжается", "discharging")) + (s.Phone ? L(" · по истории телефона", " · from phone history") : "");
         using (var f1 = UiFont(13 * k, true, false))
@@ -1165,7 +1205,7 @@ static class PhoneBattery
             g.TextRenderingHint = TextRenderingHint.AntiAlias;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             Color c = level < 0 ? Gray : (!charging && level <= LowLevel ? Red : fore);
-            using (var f = new Font("Segoe Fluent Icons", S * 0.9f, GraphicsUnit.Pixel))
+            using (var f = IconFont(S * 0.9f))
                 DrawCentered(g, GlyphPhone, f, c, new RectangleF(0, 0, S, S));
 
             float inX = S * 0.31f, inW = S * 0.38f, top = S * 0.17f, h = S * 0.62f;
@@ -1179,7 +1219,7 @@ static class PhoneBattery
             using (var b = new SolidBrush(Color.FromArgb(110, c)))
                 g.FillRectangle(b, inX, top + h - fh, inW, fh);
             if (charging)
-                using (var f = new Font("Segoe Fluent Icons", S * 0.34f, GraphicsUnit.Pixel))
+                using (var f = IconFont(S * 0.34f))
                     DrawCentered(g, GlyphBolt, f, fore, new RectangleF(0, 0, S, S));
         }
         return bmp;

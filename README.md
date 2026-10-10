@@ -15,7 +15,8 @@ camera facing you, and you cannot see its screen.
 - **Hover** the icon for level, state, temperature, screen on/off and the
   time of the last reading.
 - **Double-click** (or "Wake phone" in the menu) turns the phone screen on
-  and dismisses the lock screen, so the camera app gets a picture again.
+  and dismisses the lock screen if it has no PIN or pattern, so the camera
+  app gets a picture again.
 - **Notifications**: battery at 30 % or lower, charger disconnected, phone
   not responding three times in a row.
 - **Details window** (right-click → Details…): level, charging or discharging
@@ -48,16 +49,22 @@ Windows 10 or 11. A single exe of about 50 KB, nothing to install.
      phone-battery-tray\phone-battery.exe
    ```
 
-2. **Turn on USB debugging on the phone.** Settings → About phone →
-   Software information → tap "Build number" seven times. Then Settings →
-   Developer options → USB debugging.
+2. **Turn on USB debugging on the phone.** Tap "Build number" seven times
+   to unlock Developer options: on most phones it is in Settings → About
+   phone, on Samsung in Settings → About phone → Software information. Then
+   Settings → Developer options (on some phones under System) → USB
+   debugging. Classic USB debugging is what the program uses; Android 11+
+   "Wireless debugging" with pairing codes is not needed.
 3. **Get the program.** Download `phone-battery.exe` from
-   [Releases](../../releases), or build it yourself (see below).
+   [Releases](../../releases), or build it yourself (see below). The exe is
+   not signed, so Windows SmartScreen may say "Windows protected your PC":
+   click More info → Run anyway. If you would rather not, build it from the
+   source, it takes one command.
 4. **Run it and connect the phone by USB** with a data cable once. When the
    phone asks "Allow USB debugging?", tick "Always allow from this computer"
    and tap Allow. Within a minute the program switches adb to Wi-Fi
    (port 5555) and remembers the phone's address. After that the cable can
-   be unplugged. The phone and the PC must be on the same network.
+   be unplugged. The phone must be on Wi-Fi, in the same network as the PC.
 
 **After the phone reboots**, adb over Wi-Fi is off again, and the icon turns
 into a grey "?". Plug in the cable for a minute and the program switches it
@@ -118,6 +125,16 @@ adb. After a gap longer than 5 minutes it also reads
 30 seconds with the battery level, as offsets from a `TIME:` mark. A pause
 over 10 minutes or a `SHUTDOWN`/`START` event means the phone was off, and
 that stretch is not filled.
+
+Good to know: `adb tcpip 5555` keeps adb listening on the phone's Wi-Fi
+until the phone reboots. Only computers whose adb key you allowed on the
+phone can connect, but on an untrusted network you may prefer to turn USB
+debugging off when you do not need it. After Exit, the `adb.exe` server
+process keeps running in the background; `adb kill-server` stops it.
+
+If the icon is a grey "?", hover it: the tip says whether adb.exe was not
+found, the phone is waiting for "Allow USB debugging", or there is simply no
+connection.
 
 ## License
 
