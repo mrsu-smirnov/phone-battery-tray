@@ -13,7 +13,8 @@ camera facing you, and you cannot see its screen.
   bolt while charging, a grey "?" when the phone is not reachable. Updated
   once a minute.
 - **Hover** the icon for level, state, temperature, screen on/off and the
-  time of the last reading.
+  time of the last reading. Tips, notifications and the window title use
+  the phone's own name from its settings (About phone), e.g. "Galaxy S20".
 - **Double-click** (or "Wake phone" in the menu) turns the phone screen on
   and dismisses the lock screen if it has no PIN or pattern, so the camera
   app gets a picture again.

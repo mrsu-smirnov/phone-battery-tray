@@ -20,7 +20,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Phone battery tray")]
 [assembly: AssemblyProduct("Phone battery tray")]
 [assembly: AssemblyDescription("Android phone battery in the Windows tray via adb")]
-[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
 
 static class PhoneBattery
 {
@@ -40,7 +40,10 @@ static class PhoneBattery
     // PHONE_BATTERY_LANG=en or ru overrides it (handy for screenshots)
     static readonly bool RuUi = (Environment.GetEnvironmentVariable("PHONE_BATTERY_LANG") ?? CultureInfo.CurrentUICulture.TwoLetterISOLanguageName) == "ru";
     static string L(string ru, string en) { return RuUi ? ru : en; }
-    static readonly string WindowTitle = L("Заряд телефона", "Phone battery");
+    // Phone name from its own settings (Settings → About phone → name), e.g. "Galaxy S20"; kept after disconnects
+    static volatile string phoneName;
+    static string Name() { return phoneName ?? L("Телефон", "Phone"); }
+    static string WindowTitle() { return phoneName == null ? L("Заряд телефона", "Phone battery") : L("Заряд ", "") + phoneName + L("", " battery"); }
 
     // adb.exe: next to the program, in platform-tools next to it or one level up, in the Android SDK, else from PATH
     static string FindAdb()
@@ -136,7 +139,7 @@ static class PhoneBattery
         tray.DoubleClick += delegate { Wake(); };
 
         SetIcon(-1, false);
-        SetTip(L("Телефон: подключаюсь…", "Phone: connecting…"));
+        SetTip(Name() + L(": подключаюсь…", ": connecting…"));
         tray.Visible = true;
 
         // Start the adb server separately and without capturing output: otherwise it holds the pipe and reads hang
@@ -264,7 +267,7 @@ static class PhoneBattery
 
     static Dictionary<string, string> ReadBattery(string device)
     {
-        string raw = RunAdb("-s " + device + " shell \"dumpsys battery; dumpsys power | grep mWakefulness=\"", 8000);
+        string raw = RunAdb("-s " + device + " shell \"dumpsys battery; dumpsys power | grep mWakefulness=; echo device_name: $(settings get global device_name)\"", 8000);
         if (!Regex.IsMatch(raw, @"(?m)^\s*level:\s*\d+")) return null;
         var v = new Dictionary<string, string>();
         foreach (string k in new[] { "level", "status", "health", "temperature", "voltage", "AC powered", "USB powered", "Wireless powered", "mSavedBatteryAsoc", "mWakefulness" })
@@ -272,6 +275,9 @@ static class PhoneBattery
             var m = Regex.Match(raw, @"(?m)^\s*" + Regex.Escape(k) + @"[:=]\s*(\S+)");
             if (m.Success) v[k] = m.Groups[1].Value;
         }
+        var dn = Regex.Match(raw, @"(?m)^device_name:[ \t]*(.+?)\s*$");
+        if (dn.Success && dn.Groups[1].Value != "null")
+            phoneName = dn.Groups[1].Value.Length > 24 ? dn.Groups[1].Value.Substring(0, 24) : dn.Groups[1].Value;
         return v;
     }
 
@@ -354,19 +360,19 @@ static class PhoneBattery
             string lostTip, lostTitle, lostText;
             if (adbMissing)
             {
-                lostTip = L("Телефон: не найден adb.exe", "Phone: adb.exe not found");
+                lostTip = Name() + L(": не найден adb.exe", ": adb.exe not found");
                 lostTitle = L("Не найден adb.exe", "adb.exe not found");
                 lostText = L("Положите папку platform-tools из Android SDK рядом с программой — подробности в README.", "Put the Android SDK platform-tools folder next to the program. See the README.");
             }
             else if (unauthorized)
             {
-                lostTip = L("Телефон: разрешите отладку по USB", "Phone: allow USB debugging");
+                lostTip = Name() + L(": разрешите отладку по USB", ": allow USB debugging");
                 lostTitle = L("Разрешите отладку по USB", "Allow USB debugging");
                 lostText = L("На экране телефона: «Всегда разрешать с этого компьютера» и «Разрешить».", "On the phone screen: tick \"Always allow from this computer\" and tap Allow.");
             }
             else
             {
-                lostTip = L("Телефон: нет связи (", "Phone: no connection (") + now + L(")\nПосле перезагрузки — USB-кабель", ")\nAfter a reboot: USB for a minute");
+                lostTip = Name() + L(": нет связи (", ": no connection (") + now + L(")\nПосле перезагрузки — USB-кабель", ")\nAfter a reboot: USB for a minute");
                 lostTitle = L("Телефон не отвечает", "Phone is not responding");
                 lostText = L("Если телефон перезагружался, подключите его кабелем к компьютеру на минуту — программа сама включит связь по Wi-Fi.", "If the phone has rebooted, connect it to the computer by USB for a minute and the program will switch adb back to Wi-Fi.");
             }
@@ -402,14 +408,14 @@ static class PhoneBattery
         lastOk = DateTime.Now;
         AppendHistory(level, charging);
         string screen = Get(v, "mWakefulness") == "Awake" ? L("экран вкл", "screen on") : L("экран выкл", "screen off");
-        string tip = L("Телефон: ", "Phone: ") + level + " %, " + StatusName(Get(v, "status")) + "\n" + Temp(v) + " °C · " + screen + " · " + now;
+        string tip = Name() + ": " + level + " %, " + StatusName(Get(v, "status")) + "\n" + Temp(v) + " °C · " + screen + " · " + now;
 
         OnUi(delegate
         {
             SetIcon(level, charging);
             SetTip(tip);
             if (unplugged) tray.ShowBalloonTip(10000, L("Зарядка отключилась", "Charger disconnected"), L("Заряд ", "Battery ") + level + L(" %. Проверьте кабель.", " %. Check the cable."), ToolTipIcon.Warning);
-            if (lowNow) tray.ShowBalloonTip(10000, L("Заряд телефона ", "Phone battery ") + level + " %", L("Подключите зарядку.", "Plug in the charger."), ToolTipIcon.Warning);
+            if (lowNow) tray.ShowBalloonTip(10000, Name() + L(": заряд ", ": battery ") + level + " %", L("Подключите зарядку.", "Plug in the charger."), ToolTipIcon.Warning);
         });
     }
 
@@ -639,7 +645,7 @@ static class PhoneBattery
     static void ShowDetails()
     {
         var v = last;
-        if (v == null) { MessageBox.Show(L("Данных с телефона пока нет.", "No data from the phone yet."), WindowTitle); return; }
+        if (v == null) { MessageBox.Show(L("Данных с телефона пока нет.", "No data from the phone yet."), WindowTitle()); return; }
         float k;
         using (var g = ui.CreateGraphics()) k = g.DpiX / 96f;
         var t = Theme.Get(SystemDark());
@@ -659,7 +665,7 @@ static class PhoneBattery
         render();
 
         var form = new Form();
-        form.Text = WindowTitle;
+        form.Text = WindowTitle();
         form.FormBorderStyle = FormBorderStyle.FixedDialog;
         form.MaximizeBox = false;
         form.MinimizeBox = false;
