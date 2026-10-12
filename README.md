@@ -24,7 +24,17 @@ camera facing you, and you cannot see its screen.
   rate with time to full or to empty, voltage, battery health, screen state
   and a chart of the charge for 6 h, 12 h, 24 h or a week. Hover the line to
   see the time and level of any reading. On Samsung phones it also shows the
-  remaining capacity compared to a new battery.
+  remaining capacity compared to a new battery. The open window updates
+  itself after every reading; while the phone is unreachable it says since
+  when and shows the last known level in grey.
+- **What happened** ("Events" in the Details window, and the latest one at
+  the bottom): connection lost and back (after how long, by USB or Wi-Fi),
+  phone rebooted (told by the phone's uptime) or ran flat, waiting for
+  "Allow USB debugging", the computer asleep, charger or USB cable to the
+  computer plugged and unplugged, low battery, a new Wi-Fi address. Scroll
+  with the mouse wheel for older ones.
+
+  ![Events](screenshot-events.png)
 - **No gaps while the PC sleeps**: after a gap the program fetches the
   phone's own battery history (`dumpsys batterystats`) and fills the chart
   from it. Only where there is no data at all (the phone was off, or it
@@ -92,6 +102,7 @@ it onto the taskbar.
 | `history.csv` | One line per reading: `time;level;1 if charging`. About 40 KB a day, trimmed to 30 days |
 | `phone-history.csv` | The phone's own history, per minute, in the same format. Used only to fill gaps |
 | `phone-ip.txt` | The phone's Wi-Fi address, written when the phone is connected by USB |
+| `events.csv` | What happened: lost and restored connection, phone reboots, computer sleep, charger. Shown under "Events" in the Details window; the last 200 are kept |
 
 All of them can be deleted; history then starts again. Whole-file rewrites
 go through a temporary file and a swap, so a power loss mid-write keeps the

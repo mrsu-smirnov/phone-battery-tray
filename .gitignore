@@ -10,3 +10,4 @@ NOTES.md
 # pictures from --preview / --details / --chart: they show your own history
 *.png
 !screenshot.png
+!screenshot-events.png

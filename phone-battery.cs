@@ -20,7 +20,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Phone battery tray")]
 [assembly: AssemblyProduct("Phone battery tray")]
 [assembly: AssemblyDescription("Android phone battery in the Windows tray via adb")]
-[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
 
 static class PhoneBattery
 {
@@ -60,8 +60,10 @@ static class PhoneBattery
     }
 
     static readonly CultureInfo UiCulture = new CultureInfo(RuUi ? "ru-RU" : "en-US");
-    static readonly string[] SpanTitles = { L("Последние 6 часов", "Last 6 hours"), L("Последние 12 часов", "Last 12 hours"), L("Последние 24 часа", "Last 24 hours"), L("Последняя неделя", "Last week") };
-    static readonly string[] SpanNames = { L("6 ч", "6 h"), L("12 ч", "12 h"), L("24 ч", "24 h"), L("Неделя", "Week") };
+    // the last switch button shows the event log in place of the chart
+    static readonly string[] SpanTitles = { L("Последние 6 часов", "Last 6 hours"), L("Последние 12 часов", "Last 12 hours"), L("Последние 24 часа", "Last 24 hours"), L("Последняя неделя", "Last week"), L("Что было", "What happened") };
+    static readonly string[] SpanNames = { L("6 ч", "6 h"), L("12 ч", "12 h"), L("24 ч", "24 h"), L("Неделя", "Week"), L("Что было", "Events") };
+    const int JournalIdx = 4;
     static readonly Color LineDischarge = Color.FromArgb(0, 103, 192);
     static readonly Color LineCharge = Color.FromArgb(16, 137, 62);
 
@@ -93,6 +95,15 @@ static class PhoneBattery
     static volatile bool adbMissing;    // adb.exe could not be started
     static volatile bool unauthorized;  // the phone is on USB but has not allowed USB debugging yet
     static string tcpipDone;            // USB serial already switched to Wi-Fi, so adbd is not restarted every minute
+    // for the event log: when the connection was lost, whether that is already logged, last level and phone boot time
+    static DateTime failSince;
+    static bool lostLogged, unauthLogged;
+    static int lastLevel = -1;
+    static DateTime lastBoot = DateTime.MinValue;
+    static string lastPower = "";
+    // for the open Details window: bumped after every poll; lostSince is "HH:mm" while the connection is lost
+    static volatile int pollCount;
+    static volatile string lostSince;
 
     [STAThread]
     static void Main(string[] args)
@@ -240,6 +251,7 @@ static class PhoneBattery
             var m = Regex.Match(RunAdb("-s " + usb + " shell ip -f inet addr show wlan0", 8000), @"inet (\d+\.\d+\.\d+\.\d+)/");
             if (m.Success)
             {
+                if (ip != null && ip != m.Groups[1].Value) LogEvent(DateTime.Now, "ip", m.Groups[1].Value);
                 addr = m.Groups[1].Value + ":" + Port;
                 try { File.WriteAllText(IpFile, m.Groups[1].Value); } catch { }
             }
@@ -267,10 +279,10 @@ static class PhoneBattery
 
     static Dictionary<string, string> ReadBattery(string device)
     {
-        string raw = RunAdb("-s " + device + " shell \"dumpsys battery; dumpsys power | grep mWakefulness=; echo device_name: $(settings get global device_name)\"", 8000);
+        string raw = RunAdb("-s " + device + " shell \"dumpsys battery; dumpsys power | grep mWakefulness=; echo device_name: $(settings get global device_name); echo uptime: $(cut -d. -f1 /proc/uptime)\"", 8000);
         if (!Regex.IsMatch(raw, @"(?m)^\s*level:\s*\d+")) return null;
         var v = new Dictionary<string, string>();
-        foreach (string k in new[] { "level", "status", "health", "temperature", "voltage", "AC powered", "USB powered", "Wireless powered", "mSavedBatteryAsoc", "mWakefulness" })
+        foreach (string k in new[] { "level", "status", "health", "temperature", "voltage", "AC powered", "USB powered", "Wireless powered", "mSavedBatteryAsoc", "mWakefulness", "uptime" })
         {
             var m = Regex.Match(raw, @"(?m)^\s*" + Regex.Escape(k) + @"[:=]\s*(\S+)");
             if (m.Success) v[k] = m.Groups[1].Value;
@@ -285,10 +297,16 @@ static class PhoneBattery
     static void PollLoop()
     {
         TrimHistory();
+        LogEvent(DateTime.Now, "start", "");
         while (true)
         {
             try { UpdateStatus(); } catch { }
+            pollCount++;
+            DateTime before = DateTime.Now;
             kick.WaitOne(PollSec * 1000);
+            // a wait far longer than a minute means the computer slept
+            double slept = (DateTime.Now - before).TotalMinutes;
+            if (slept > PollSec / 60.0 + 3) LogEvent(before, "sleep", ((int)Math.Round(slept)).ToString());
         }
     }
 
@@ -356,6 +374,15 @@ static class PhoneBattery
         if (v == null)
         {
             failCount++;
+            if (failCount == 1) failSince = DateTime.Now;
+            // one missed reading is not logged: adb over Wi-Fi sometimes skips a beat
+            if (failCount == 2 && !lostLogged && lastOk != DateTime.MinValue)
+            {
+                LogEvent(failSince, "lost", lastLevel >= 0 ? lastLevel.ToString() : "");
+                lostLogged = true;
+            }
+            if (failCount >= 2) lostSince = failSince.ToString("HH:mm");
+            if (unauthorized && !unauthLogged) { LogEvent(DateTime.Now, "unauth", ""); unauthLogged = true; }
             // tray tips are cut at 63 characters
             string lostTip, lostTitle, lostText;
             if (adbMissing)
@@ -372,7 +399,7 @@ static class PhoneBattery
             }
             else
             {
-                lostTip = Name() + L(": нет связи (", ": no connection (") + now + L(")\nПосле перезагрузки — USB-кабель", ")\nAfter a reboot: USB for a minute");
+                lostTip = Name() + L(": нет связи с ", ": no connection since ") + failSince.ToString("HH:mm") + L("\nПосле перезагрузки — USB-кабель", "\nAfter a reboot: USB for a minute");
                 lostTitle = L("Телефон не отвечает", "Phone is not responding");
                 lostText = L("Если телефон перезагружался, подключите его кабелем к компьютеру на минуту — программа сама включит связь по Wi-Fi.", "If the phone has rebooted, connect it to the computer by USB for a minute and the program will switch adb back to Wi-Fi.");
             }
@@ -387,8 +414,6 @@ static class PhoneBattery
             return;
         }
 
-        failCount = 0;
-        lostWarned = false;
         v["time"] = now;
         last = v;
         int level = int.Parse(Get(v, "level"));
@@ -398,6 +423,28 @@ static class PhoneBattery
         bool lowNow = low && !lowWarned;
         if (lowNow) lowWarned = true;
         if (!low) lowWarned = false;
+
+        // events: reboot (boot time moved), connection back, charger, low battery
+        long up;
+        if (long.TryParse(Get(v, "uptime"), out up))
+        {
+            DateTime boot = DateTime.Now.AddSeconds(-up);
+            if (lastBoot != DateTime.MinValue && (boot - lastBoot).TotalMinutes > 2)
+                LogEvent(boot, "boot", lastLevel >= 0 && lastLevel <= 2 && wasCharging != true ? "1" : "0");
+            lastBoot = boot;
+        }
+        if (lostLogged)
+            LogEvent(DateTime.Now, "back", (dev.Contains(":") ? "wifi" : "usb") + ";" + (int)Math.Round((DateTime.Now - failSince).TotalMinutes));
+        // the power source goes along: "usb" is a cable to a computer, told apart from a charger
+        string power = Get(v, "AC powered") == "true" ? "ac" : Get(v, "USB powered") == "true" ? "usb" : Get(v, "Wireless powered") == "true" ? "wireless" : "";
+        if (wasCharging.HasValue && wasCharging.Value != charging)
+            LogEvent(DateTime.Now, charging ? "plug" : "unplug", level + ";" + (charging ? power : lastPower));
+        lastPower = power;
+        if (lowNow) LogEvent(DateTime.Now, "low", level.ToString());
+        lostSince = null;
+        failCount = 0;
+        lostWarned = lostLogged = unauthLogged = false;
+        lastLevel = level;
         wasCharging = charging;
         // at startup and after a gap (PC slept, no connection), fetch the phone's own history
         if (!phoneFilled || (DateTime.Now - lastOk).TotalMinutes > GapMin)
@@ -556,8 +603,9 @@ static class PhoneBattery
         return r;
     }
 
-    static Bitmap DrawDetails(Dictionary<string, string> v, string device, List<Sample> h, DateTime now, Theme t, float k,
-                              out RectangleF button, out ChartGeo geo, out RectangleF[] spans)
+    // lost: "HH:mm" when the connection has been lost since then; the top card then shows the last known level in grey
+    static Bitmap DrawDetails(Dictionary<string, string> v, string device, string lost, List<Sample> h, List<Ev> ev, DateTime now, Theme t, float k,
+                              out RectangleF button, out ChartGeo geo, out RectangleF[] spans, out RectangleF footer)
     {
         spans = new RectangleF[SpanNames.Length];
         float W = 600 * k, pad = 20 * k, gap = 8 * k, cw = W - 2 * pad, x = pad;
@@ -588,13 +636,21 @@ static class PhoneBattery
             bool charging = Get(v, "status") == "2" || Get(v, "status") == "5" || Plugged(v);
             FillRounded(g, t.Card, t.CardBorder, new RectangleF(x, y, cw, heroH), 8 * k, k);
             string pct = level + " %";
-            Write(g, pct, big, t.Text, x + 20 * k, y + 14 * k);
+            Write(g, pct, big, lost != null ? t.Sub : t.Text, x + 20 * k, y + 14 * k);
             float tx = x + 20 * k + Width(g, pct, big) + 28 * k;
-            Write(g, Cap(StatusName(Get(v, "status"))), title, t.Text, tx, y + 20 * k);
-            Write(g, SpeedDetail(h, now), body, t.Sub, tx, y + 48 * k);
+            if (lost != null)
+            {
+                Write(g, L("Нет связи с ", "No connection since ") + lost, title, t.Low, tx, y + 20 * k);
+                Write(g, Fit(g, L("заряд на ", "level as of ") + Get(v, "time") + L(" · после перезагрузки — USB-кабель", " · after a reboot: USB cable"), body, x + cw - 20 * k - tx), body, t.Sub, tx, y + 48 * k);
+            }
+            else
+            {
+                Write(g, Cap(StatusName(Get(v, "status"))), title, t.Text, tx, y + 20 * k);
+                Write(g, SpeedDetail(h, now), body, t.Sub, tx, y + 48 * k);
+            }
             var track = new RectangleF(x + 20 * k, y + heroH - 24 * k, cw - 40 * k, 6 * k);
             FillRounded(g, t.Track, Color.Empty, track, 3 * k, k);
-            Color bar = charging ? t.Charge : (level <= LowLevel ? t.Low : t.Accent);
+            Color bar = lost != null ? t.Sub : charging ? t.Charge : (level <= LowLevel ? t.Low : t.Accent);
             if (level > 0)
                 FillRounded(g, bar, Color.Empty, new RectangleF(track.X, track.Y, Math.Max(track.Height, track.Width * Math.Min(100, level) / 100f), track.Height), 3 * k, k);
             y += heroH + 12 * k;
@@ -617,9 +673,17 @@ static class PhoneBattery
                 if (i == spanIdx) FillRounded(g, t.Button, t.ButtonBorder, r, 4 * k, k);
                 Write(g, SpanNames[i], small, i == spanIdx ? t.Text : t.Sub, r.X + 10 * k, r.Y + (r.Height - small.Height) / 2);
             }
-            using (var ch = DrawChart(h, now, SpanHours[spanIdx], k, t, (int)(cw - 16 * k), (int)chartH, out geo))
-                g.DrawImage(ch, x + 8 * k, y + 44 * k, ch.Width, ch.Height);
-            geo.Plot.Offset(x + 8 * k, y + 44 * k);
+            if (spanIdx == JournalIdx)
+            {
+                geo = null;
+                DrawJournal(g, ev, now, new RectangleF(x + 16 * k, y + 50 * k, cw - 32 * k, chartH - 6 * k), t, k);
+            }
+            else
+            {
+                using (var ch = DrawChart(h, now, SpanHours[spanIdx], k, t, (int)(cw - 16 * k), (int)chartH, out geo))
+                    g.DrawImage(ch, x + 8 * k, y + 44 * k, ch.Width, ch.Height);
+                geo.Plot.Offset(x + 8 * k, y + 44 * k);
+            }
             y += chartCardH + 12 * k;
 
             // other values: small cards, three per row
@@ -633,9 +697,20 @@ static class PhoneBattery
             }
             y += infoH + 20 * k;
 
-            // footer: connection and button
-            Write(g, L("Связь ", "Connected ") + device + L(" · обновлено ", " · updated ") + Get(v, "time"), small, t.Sub, x, y + (footH - small.Height) / 2);
+            // footer: the latest event (a click opens the log), else the connection; and the button
             button = new RectangleF(x + cw - 120 * k, y, 120 * k, footH);
+            float maxW = button.X - x - 16 * k;
+            string updated = L(" · обновлено ", " · updated ") + Get(v, "time");
+            string foot = L("Связь ", "Connected ") + device + updated;
+            if (ev.Count > 0)
+            {
+                foot = EventWhen(ev[0].T, now) + " — " + EventText(ev[0]);
+                if (Width(g, foot + updated, small) <= maxW) foot += updated;
+            }
+            foot = Fit(g, foot, small, maxW);
+            float fy = y + (footH - small.Height) / 2;
+            Write(g, foot, small, t.Sub, x, fy);
+            footer = ev.Count > 0 ? new RectangleF(x, fy, Width(g, foot, small), small.Height) : RectangleF.Empty;
             FillRounded(g, t.Button, t.ButtonBorder, button, 4 * k, k);
             Write(g, L("Закрыть", "Close"), body, t.Text, button.X + (button.Width - Width(g, L("Закрыть", "Close"), body)) / 2, button.Y + (footH - body.Height) / 2);
         }
@@ -652,14 +727,19 @@ static class PhoneBattery
         RectangleF btn = RectangleF.Empty;
         ChartGeo geo = null;
         RectangleF[] spans = null;
+        RectangleF foot = RectangleF.Empty;
         Bitmap bmp = null;
         var h = LoadHistory(DateTime.Now.AddHours(-SpanHours[SpanHours.Length - 1]));
+        var ev = LoadEvents();
         DateTime now = DateTime.Now;
         Point? mouse = null;
+        PictureBox pic = null;
+        journalSkip = 0;
         Action render = delegate
         {
             var old = bmp;
-            bmp = DrawDetails(v, dev, h, now, t, k, out btn, out geo, out spans);
+            bmp = DrawDetails(v, dev, lostSince, h, ev, now, t, k, out btn, out geo, out spans, out foot);
+            if (pic != null) pic.Image = bmp;
             if (old != null) old.Dispose();
         };
         render();
@@ -678,13 +758,13 @@ static class PhoneBattery
         // dark title bar (DWMWA_USE_IMMERSIVE_DARK_MODE)
         form.HandleCreated += delegate { int on = t.Dark ? 1 : 0; DwmSetWindowAttribute(form.Handle, 20, ref on, 4); };
 
-        var pic = new PictureBox();
+        pic = new PictureBox();
         pic.Image = bmp;
         pic.SizeMode = PictureBoxSizeMode.AutoSize;
         Func<Point, int> spanAt = p => { for (int i = 0; i < spans.Length; i++) if (spans[i].Contains(p)) return i; return -1; };
         pic.MouseMove += delegate(object s, MouseEventArgs e)
         {
-            pic.Cursor = btn.Contains(e.Location) || spanAt(e.Location) >= 0 ? Cursors.Hand : Cursors.Default;
+            pic.Cursor = btn.Contains(e.Location) || spanAt(e.Location) >= 0 || foot.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
             mouse = e.Location;
             pic.Invalidate();
         };
@@ -692,15 +772,44 @@ static class PhoneBattery
         pic.MouseClick += delegate(object s, MouseEventArgs e)
         {
             if (btn.Contains(e.Location)) { form.Close(); return; }
-            int i = spanAt(e.Location);
+            int i = foot.Contains(e.Location) ? JournalIdx : spanAt(e.Location);
             if (i < 0 || i == spanIdx) return;
             spanIdx = i;
+            journalSkip = 0;
             render();
-            pic.Image = bmp;
         };
+        // the mouse wheel scrolls the event list, two rows a notch. The wheel goes to the picture or to the window,
+        // depending on Windows settings; the picture marks it handled so it does not scroll twice
+        MouseEventHandler wheel = delegate(object s, MouseEventArgs e)
+        {
+            var he = e as HandledMouseEventArgs;
+            if (he != null) he.Handled = true;
+            if (spanIdx != JournalIdx) return;
+            journalSkip -= Math.Sign(e.Delta) * 2;
+            render();
+        };
+        pic.MouseWheel += wheel;
+        form.MouseWheel += wheel;
         // the hover tooltip is painted over the window picture
         pic.Paint += delegate(object s, PaintEventArgs e) { if (mouse.HasValue) DrawHover(e.Graphics, geo, h, mouse.Value, t, k); };
         form.Controls.Add(pic);
+
+        // after every poll the window redraws itself with fresh data and events
+        int seen = pollCount;
+        var timer = new System.Windows.Forms.Timer();
+        timer.Interval = 2000;
+        timer.Tick += delegate
+        {
+            if (pollCount == seen) return;
+            seen = pollCount;
+            if (last != null) v = last;
+            h = LoadHistory(DateTime.Now.AddHours(-SpanHours[SpanHours.Length - 1]));
+            ev = LoadEvents();
+            now = DateTime.Now;
+            render();
+            form.ClientSize = bmp.Size;
+        };
+        timer.Start();
 
         // window and taskbar icon: the same phone with the charge level as in the tray
         int lv;
@@ -712,6 +821,7 @@ static class PhoneBattery
         form.Icon = Icon.FromHandle(hBig);
 
         form.ShowDialog();
+        timer.Dispose();
         DestroyIcon(hBig);
         bmp.Dispose();
         form.Dispose();
@@ -725,17 +835,37 @@ static class PhoneBattery
         v["mSavedBatteryAsoc"] = "87"; v["mWakefulness"] = "Asleep"; v["time"] = DateTime.Now.ToString("HH:mm");
         var h = LoadHistory(DateTime.Now.AddHours(-SpanHours[SpanHours.Length - 1]));
         v["level"] = h.Count > 0 ? h[h.Count - 1].Level.ToString() : "88";
+        // sample events: a phone reboot fixed with the cable, charging, a night of the computer asleep
+        DateTime n0 = DateTime.Now;
+        sampleEvents = new List<Ev>();
+        Action<double, string, string> add = (min, kind, arg) => { Ev e; e.T = n0.AddMinutes(-min); e.Kind = kind; e.Arg = arg; sampleEvents.Add(e); };
+        add(0.5, "unplug", "88;usb");
+        add(1, "back", "usb;4");
+        add(1, "plug", "88;usb");
+        add(5, "lost", "88");
+        add(5.5, "boot", "0");
+        add(95, "unplug", "100;ac");
+        add(190, "plug", "27;ac");
+        add(200, "low", "28");
+        add(14 * 60, "sleep", "430");
+        add(14 * 60 + 5, "start", "");
+        add(26 * 60, "unplug", "100;ac");
+        add(29 * 60, "plug", "41;ac");
+        add(33 * 60, "ip", "192.168.1.56");
+        var ev = LoadEvents();
         float k = 1.25f;
-        // the hover tooltip is shown on the sample 90 minutes before the last one
+        // every period in dark, 24 h in light, then the event list with the connection lost.
+        // The hover tooltip is shown on the sample 90 minutes before the last one
         var shots = new List<Bitmap>();
-        for (int i = 0; i <= SpanNames.Length; i++)
+        for (int i = 0; i <= SpanNames.Length + 1; i++)
         {
-            bool dark = i < SpanNames.Length;
-            spanIdx = dark ? i : 2;
+            bool dark = i != SpanNames.Length;
+            spanIdx = i < SpanNames.Length ? i : i == SpanNames.Length ? 2 : JournalIdx;
+            journalSkip = 0;
             var t = Theme.Get(dark);
-            RectangleF btn; ChartGeo geo; RectangleF[] spans;
-            var bmp = DrawDetails(v, "192.168.0.10:5555", h, DateTime.Now, t, k, out btn, out geo, out spans);
-            if (h.Count > 0)
+            RectangleF btn, foot; ChartGeo geo; RectangleF[] spans;
+            var bmp = DrawDetails(v, "192.168.0.10:5555", i > SpanNames.Length ? n0.AddMinutes(-3).ToString("HH:mm") : null, h, ev, DateTime.Now, t, k, out btn, out geo, out spans, out foot);
+            if (h.Count > 0 && geo != null)
             {
                 DateTime at = h[h.Count - 1].T.AddMinutes(-90);
                 float px = geo.Plot.X + (float)((at - geo.From).TotalHours / geo.Hours) * geo.Plot.Width;
@@ -761,6 +891,158 @@ static class PhoneBattery
         string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + ";" + level + ";" + (charging ? 1 : 0) + "\n";
         lock (historyLock)
             try { File.AppendAllText(HistoryFile, line); } catch { }
+    }
+
+    // ---------- events: what happened to the connection and the charger ----------
+    // events.csv, one line per event: "time;kind;argument". Kinds: start, lost (level before), back (usb|wifi;minutes),
+    // boot (1 if the battery had run flat), unauth, sleep (minutes), plug / unplug / low (level), ip (new address)
+    static readonly string EventsFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "events.csv");
+    const int KeepEvents = 200;
+    struct Ev { public DateTime T; public string Kind, Arg; }
+    static List<Ev> sampleEvents;   // --details draws these instead of events.csv
+
+    static void LogEvent(DateTime t, string kind, string arg)
+    {
+        string line = t.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + ";" + kind + ";" + arg + "\n";
+        lock (historyLock)
+            try
+            {
+                File.AppendAllText(EventsFile, line);
+                if (new FileInfo(EventsFile).Length < 32 * 1024) return;
+                var all = File.ReadAllLines(EventsFile);
+                if (all.Length <= KeepEvents) return;
+                var keep = new string[KeepEvents];
+                Array.Copy(all, all.Length - KeepEvents, keep, 0, KeepEvents);
+                WriteWhole(EventsFile, string.Join("\n", keep) + "\n");
+            }
+            catch { }
+    }
+
+    // newest first
+    static List<Ev> LoadEvents()
+    {
+        var list = new List<Ev>();
+        if (sampleEvents != null) list.AddRange(sampleEvents);
+        else
+        {
+            string[] lines;
+            lock (historyLock)
+            {
+                try { if (!File.Exists(EventsFile)) return list; lines = File.ReadAllLines(EventsFile); }
+                catch { return list; }
+            }
+            foreach (string line in lines)
+            {
+                string[] p = line.Split(new[] { ';' }, 3);
+                Ev e;
+                if (p.Length != 3 || !DateTime.TryParseExact(p[0], "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out e.T)) continue;
+                e.Kind = p[1];
+                e.Arg = p[2];
+                list.Add(e);
+            }
+        }
+        list.Sort((a, b) => b.T.CompareTo(a.T));
+        return list;
+    }
+
+    static string EventText(Ev e)
+    {
+        string[] a = e.Arg.Split(';');
+        int n;
+        switch (e.Kind)
+        {
+            case "start": return L("Программа запущена", "Program started");
+            case "lost": return L("Связь пропала", "Connection lost") + (e.Arg != "" ? L(" · заряд был ", " · battery was ") + e.Arg + " %" : "");
+            case "back":
+                string how = a[0] == "usb" ? L("по кабелю", "by USB") : L("по Wi-Fi", "over Wi-Fi");
+                return int.TryParse(a.Length > 1 ? a[1] : "", out n)
+                    ? L("Связь вернулась через ", "Connection back after ") + Duration(n / 60.0) + " · " + how
+                    : L("Связь вернулась · ", "Connection back · ") + how;
+            case "boot": return e.Arg == "1" ? L("Телефон разрядился и включился снова", "Phone ran flat and started again") : L("Телефон перезагрузился", "Phone rebooted");
+            case "unauth": return L("Телефон ждёт «Разрешить отладку по USB»", "Phone waits for \"Allow USB debugging\"");
+            case "sleep": return int.TryParse(e.Arg, out n) ? L("Компьютер спал ", "Computer slept for ") + Duration(n / 60.0) : L("Компьютер спал", "Computer slept");
+            case "plug":
+                return (a.Length > 1 && a[1] == "usb" ? L("Кабель от компьютера подключён · ", "USB cable to the computer plugged in · ") : L("Зарядка подключена · ", "Charger connected · ")) + a[0] + " %";
+            case "unplug":
+                return (a.Length > 1 && a[1] == "usb" ? L("Кабель от компьютера отключён · ", "USB cable to the computer unplugged · ") : L("Зарядка отключена · ", "Charger disconnected · ")) + a[0] + " %";
+            case "low": return L("Заряд упал до ", "Battery down to ") + e.Arg + " %";
+            case "ip": return L("Телефон сменил адрес в Wi-Fi: ", "Phone's Wi-Fi address changed: ") + e.Arg;
+            default: return e.Kind;
+        }
+    }
+
+    static Color EventColor(Ev e, Theme t)
+    {
+        if ((e.Kind == "plug" || e.Kind == "unplug") && e.Arg.EndsWith(";usb")) return t.Sub;   // a cable to the computer is not news
+        switch (e.Kind)
+        {
+            case "lost": case "unauth": case "low": return t.Low;
+            case "back": case "plug": return t.Charge;
+            case "boot": case "unplug": return t.Accent;
+            default: return t.Sub;
+        }
+    }
+
+    static string EventWhen(DateTime t, DateTime now)
+    {
+        if (t.Date == now.Date) return t.ToString("HH:mm");
+        if (t.Date == now.Date.AddDays(-1)) return L("вчера ", "yesterday ") + t.ToString("HH:mm");
+        return t.ToString("d MMM HH:mm", UiCulture);
+    }
+
+    // a string cut with "…" to fit maxW
+    static string Fit(Graphics g, string s, Font f, float maxW)
+    {
+        if (Width(g, s, f) <= maxW) return s;
+        while (s.Length > 1 && Width(g, s + "…", f) > maxW) s = s.Substring(0, s.Length - 1);
+        return s.TrimEnd(' ', '·') + "…";
+    }
+
+    // rows scrolled past in the event list; the mouse wheel changes it, opening the window resets it
+    static int journalSkip;
+
+    // The event list in place of the chart: newest on top, as many as fit, a hint row when more are below
+    static void DrawJournal(Graphics g, List<Ev> ev, DateTime now, RectangleF r, Theme t, float k)
+    {
+        using (var body = UiFont(14 * k, false, false))
+        using (var small = UiFont(12 * k, false, false))
+        {
+            if (ev.Count == 0)
+            {
+                DrawCentered(g, L("Пока ничего не случилось. Здесь появятся потери связи,\nперезагрузки телефона и зарядка", "Nothing yet. Lost connections, phone reboots\nand charging will show up here"), small, t.Sub, r);
+                return;
+            }
+            float rowH = 28 * k;
+            int fit = (int)(r.Height / rowH);
+            // the last row turns into "N more below" while there are more; scrolled to the end, it holds an event again
+            int maxSkip = ev.Count <= fit ? 0 : ev.Count - fit;
+            journalSkip = Math.Max(0, Math.Min(journalSkip, maxSkip));
+            int rows = Math.Min(ev.Count - journalSkip, fit);
+            int below = ev.Count - journalSkip - rows;
+            if (below > 0) { rows--; below++; }
+            float timeW = 0;
+            for (int i = 0; i < rows; i++) timeW = Math.Max(timeW, Width(g, EventWhen(ev[journalSkip + i].T, now), small));
+            float textX = r.X + 18 * k + timeW + 16 * k;
+            using (var grid = new Pen(t.Grid, Math.Max(1, k)))
+            {
+                for (int i = 0; i < rows; i++)
+                {
+                    Ev e = ev[journalSkip + i];
+                    float y = r.Y + i * rowH;
+                    if (i > 0) g.DrawLine(grid, r.X, y, r.Right, y);
+                    float mid = y + rowH / 2;
+                    using (var dot = new SolidBrush(EventColor(e, t))) g.FillEllipse(dot, r.X + 2 * k, mid - 4 * k, 8 * k, 8 * k);
+                    Write(g, EventWhen(e.T, now), small, t.Sub, r.X + 18 * k, mid - small.Height / 2);
+                    Write(g, Fit(g, EventText(e), body, r.Right - textX), body, t.Text, textX, mid - body.Height / 2);
+                }
+                if (below > 0)
+                {
+                    float y = r.Y + rows * rowH;
+                    g.DrawLine(grid, r.X, y, r.Right, y);
+                    Write(g, L("ещё ", "") + below + L(" раньше — прокрутите колесом мыши ↓", " earlier: scroll with the mouse wheel ↓"), small, t.Sub, textX, y + (rowH - small.Height) / 2);
+                }
+            }
+        }
     }
 
     // Own readings; where there are none for longer than GapMin, per-minute points from the phone's history
