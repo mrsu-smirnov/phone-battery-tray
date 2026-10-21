@@ -20,7 +20,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Phone battery tray")]
 [assembly: AssemblyProduct("Phone battery tray")]
 [assembly: AssemblyDescription("Android phone battery in the Windows tray via adb")]
-[assembly: AssemblyVersion("1.2.1.0")]
+[assembly: AssemblyVersion("1.2.2.0")]
 
 static class PhoneBattery
 {
