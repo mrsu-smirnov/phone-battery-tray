@@ -20,7 +20,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Phone battery tray")]
 [assembly: AssemblyProduct("Phone battery tray")]
 [assembly: AssemblyDescription("Android phone battery in the Windows tray via adb")]
-[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyVersion("1.2.1.0")]
 
 static class PhoneBattery
 {
@@ -1226,7 +1226,10 @@ static class PhoneBattery
                && (h[j].T - h[j - 1].T).TotalMinutes <= GapMin
                && (end.T - h[j - 1].T).TotalHours <= 2) j--;
         double hours = (end.T - h[j].T).TotalHours;
-        if (hours < MinHours) return L("скорость — через ", "rate in ") + Duration(MinHours - hours);
+        if (hours < MinHours)
+            return (end.Charging ? L("Скорость зарядки будет посчитана через ", "Charging rate will be calculated in ")
+                                 : L("Скорость разрядки будет посчитана через ", "Discharge rate will be calculated in "))
+                   + Duration(MinHours - hours);
         double rate = (end.Level - h[j].Level) / hours;
         if (end.Charging)
         {
