@@ -1243,7 +1243,10 @@ static class PhoneBattery
 
     static string Speed(List<Sample> h, DateTime now)
     {
-        return L("Скорость: ", "Rate: ") + SpeedDetail(h, now);
+        string d = SpeedDetail(h, now);
+        // the "will be calculated" hints already start with the word rate
+        if (d.StartsWith("Скорость") || d.StartsWith("Charging") || d.StartsWith("Discharge")) return d;
+        return L("Скорость: ", "Rate: ") + d;
     }
 
     // Where the plot area is on the picture and what time it shows: for the hover tooltip
